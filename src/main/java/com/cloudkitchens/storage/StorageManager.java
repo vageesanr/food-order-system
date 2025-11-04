@@ -375,23 +375,23 @@ public class StorageManager {
         // We need to exclude orders that have scheduled pickups at or before this timestamp,
         // because those orders will be gone by the time we place the new order.
         // The server validates actions in chronological order, and at the same timestamp,
-        // pickups are processed before placements, so we exclude orders with pickups
-        // scheduled at the exact same timestamp.
+        // pickups are processed BEFORE placements, so we exclude orders with pickups
+        // scheduled at the exact same timestamp or earlier.
         int count = 0;
         for (StorageLocation location : storage.get(storageType)) {
             String orderId = location.getOrder().getId();
             Long pickupTimestamp = scheduledPickups.get(orderId);
             // Count the order only if:
             // 1. It doesn't have a scheduled pickup, OR
-            // 2. The scheduled pickup is AT OR AFTER the placement timestamp
-            // At the same timestamp, placements happen before pickups, so we count orders
-            // whose pickups are scheduled at the same timestamp or later.
-            // We only exclude orders whose pickups are scheduled BEFORE the placement timestamp.
-            if (pickupTimestamp == null || pickupTimestamp >= timestampMicros) {
+            // 2. The scheduled pickup is STRICTLY AFTER the placement timestamp
+            // At the same timestamp, pickups happen BEFORE placements, so we exclude orders
+            // whose pickups are scheduled at the same timestamp or earlier.
+            // We only count orders whose pickups are scheduled AFTER the placement timestamp.
+            if (pickupTimestamp == null || pickupTimestamp > timestampMicros) {
                 count++;
             } else {
-                // Order has pickup scheduled BEFORE this timestamp - exclude it
-                logger.info("Excluding order {} from effective size: pickup scheduled at {} < placement at {}", 
+                // Order has pickup scheduled at or before this timestamp - exclude it
+                logger.info("Excluding order {} from effective size: pickup scheduled at {} <= placement at {}", 
                            orderId, pickupTimestamp, timestampMicros);
             }
         }
