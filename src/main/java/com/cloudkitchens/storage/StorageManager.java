@@ -378,6 +378,9 @@ public class StorageManager {
         // pickups are processed BEFORE placements, so we exclude orders with pickups
         // scheduled at the exact same timestamp or earlier.
         int count = 0;
+        java.util.List<String> includedOrders = new java.util.ArrayList<>();
+        java.util.List<String> excludedOrders = new java.util.ArrayList<>();
+        
         for (StorageLocation location : storage.get(storageType)) {
             String orderId = location.getOrder().getId();
             Long pickupTimestamp = scheduledPickups.get(orderId);
@@ -389,12 +392,17 @@ public class StorageManager {
             // We only count orders whose pickups are scheduled AFTER the placement timestamp.
             if (pickupTimestamp == null || pickupTimestamp > timestampMicros) {
                 count++;
+                includedOrders.add(orderId + (pickupTimestamp != null ? "(pickup@" + pickupTimestamp + ")" : "(no pickup)"));
             } else {
                 // Order has pickup scheduled at or before this timestamp - exclude it
-                logger.info("Excluding order {} from effective size: pickup scheduled at {} <= placement at {}", 
-                           orderId, pickupTimestamp, timestampMicros);
+                excludedOrders.add(orderId + "(pickup@" + pickupTimestamp + " <= placement@" + timestampMicros + ")");
             }
         }
+        
+        logger.info("Effective size calculation for {} at timestamp {}: count={}, included={}, excluded={}",
+                   storageType, timestampMicros, count, String.join(", ", includedOrders), 
+                   excludedOrders.isEmpty() ? "none" : String.join(", ", excludedOrders));
+        
         return count;
     }
     
