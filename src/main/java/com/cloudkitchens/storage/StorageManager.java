@@ -360,16 +360,13 @@ public class StorageManager {
      * Get the effective size of storage at a given timestamp, excluding orders with pickups scheduled before that timestamp.
      */
     private int getEffectiveSizeAtTimestamp(StorageType storageType, long timestampMicros) {
-        int count = 0;
-        for (StorageLocation location : storage.get(storageType)) {
-            String orderId = location.getOrder().getId();
-            Long pickupTimestamp = scheduledPickups.get(orderId);
-            // Count order if it doesn't have a scheduled pickup, or if pickup is after the placement timestamp
-            if (pickupTimestamp == null || pickupTimestamp > timestampMicros) {
-                count++;
-            }
-        }
-        return count;
+        // Count orders that are currently in storage at this timestamp.
+        // Since pickups happen asynchronously, we need to exclude orders that have been
+        // picked up by this timestamp. Since we execute placements sequentially, orders
+        // currently in storage were all placed before this timestamp.
+        // Orders that have been picked up have already been removed from storage, so
+        // we just need to count the current size.
+        return storage.get(storageType).size();
     }
     
     /**
