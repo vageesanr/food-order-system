@@ -28,7 +28,12 @@ public class StorageManager {
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
     
     // Track scheduled pickup timestamps (orderId -> pickup timestamp)
+    // Note: We keep these even after pickup to allow state reconstruction at any timestamp
     private final Map<String, Long> scheduledPickups = new ConcurrentHashMap<>();
+    
+    // Track all placements ever made (orderId -> StorageLocation with placement timestamp)
+    // This allows us to reconstruct storage state at any timestamp
+    private final Map<String, StorageLocation> allPlacements = new ConcurrentHashMap<>();
     
     public StorageManager() {
         storage.put(StorageType.HEATER, new ArrayList<>());
@@ -169,8 +174,10 @@ public class StorageManager {
                 return null;
             }
             
-            // Remove scheduled pickup tracking (order is being picked up now)
-            scheduledPickups.remove(orderId);
+            // Note: We keep the scheduled pickup timestamp in scheduledPickups even after pickup
+            // This allows us to correctly calculate effective size at future timestamps
+            // The order will be removed from storage, but we can still check its scheduled pickup
+            // timestamp to determine if it should be counted at a given timestamp
             
             // Check if order is spoiled
             if (FreshnessCalculator.isSpoiled(location, timestampMicros)) {
@@ -242,6 +249,14 @@ public class StorageManager {
             // Add to new storage
             storage.get(newStorageType).add(newLocation);
             orderLocations.put(orderId, newLocation);
+            // Update allPlacements to reflect the move - use the move timestamp as the new placement timestamp
+            // for the new storage type (the order is now "placed" in the new storage at the move time)
+            StorageLocation movedLocation = new StorageLocation(
+                currentLocation.getOrder(),
+                newStorageType,
+                timestampMicros  // Use move timestamp as placement timestamp in new storage
+            );
+            allPlacements.put(orderId, movedLocation);
             discardStrategy.addOrder(newLocation);
             
             logger.info("Moved order {} from {} to {}", orderId, currentLocation.getStorageType(), newStorageType);
@@ -316,8 +331,9 @@ public class StorageManager {
             throw new IllegalStateException(error);
         }
         
-                storage.get(storageType).add(location);
+        storage.get(storageType).add(location);
         orderLocations.put(order.getId(), location);
+        allPlacements.put(order.getId(), location);  // Track all placements for state reconstruction
         discardStrategy.addOrder(location);
 
         int sizeAfterAdd = getEffectiveSizeAtTimestamp(storageType, timestampMicros);
@@ -372,8 +388,9 @@ public class StorageManager {
      */
     private int getEffectiveSizeAtTimestamp(StorageType storageType, long timestampMicros) {
         // Count orders that will be in storage at the given timestamp.
-        // We need to exclude orders that have scheduled pickups at or before this timestamp,
-        // because those orders will be gone by the time we place the new order.
+        // We need to reconstruct the state at this timestamp by checking:
+        // 1. Orders that were placed before or at this timestamp
+        // 2. Orders whose pickups are scheduled after this timestamp (or have no scheduled pickup)
         // The server validates actions in chronological order, and at the same timestamp,
         // pickups are processed BEFORE placements, so we exclude orders with pickups
         // scheduled at the exact same timestamp or earlier.
@@ -381,8 +398,21 @@ public class StorageManager {
         java.util.List<String> includedOrders = new java.util.ArrayList<>();
         java.util.List<String> excludedOrders = new java.util.ArrayList<>();
         
-        for (StorageLocation location : storage.get(storageType)) {
+        // Check all orders that were ever placed in this storage type
+        for (StorageLocation location : allPlacements.values()) {
+            // Only consider orders placed in this storage type
+            if (location.getStorageType() != storageType) {
+                continue;
+            }
+            
             String orderId = location.getOrder().getId();
+            long placementTimestamp = location.getPlacedAtMicros();
+            
+            // Only count orders placed before or at this timestamp
+            if (placementTimestamp > timestampMicros) {
+                continue; // Order was placed after this timestamp, don't count it
+            }
+            
             Long pickupTimestamp = scheduledPickups.get(orderId);
             // Count the order only if:
             // 1. It doesn't have a scheduled pickup, OR
@@ -392,10 +422,10 @@ public class StorageManager {
             // We only count orders whose pickups are scheduled AFTER the placement timestamp.
             if (pickupTimestamp == null || pickupTimestamp > timestampMicros) {
                 count++;
-                includedOrders.add(orderId + (pickupTimestamp != null ? "(pickup@" + pickupTimestamp + ")" : "(no pickup)"));
+                includedOrders.add(orderId + "(placed@" + placementTimestamp + (pickupTimestamp != null ? ", pickup@" + pickupTimestamp + ")" : ", no pickup)"));
             } else {
                 // Order has pickup scheduled at or before this timestamp - exclude it
-                excludedOrders.add(orderId + "(pickup@" + pickupTimestamp + " <= placement@" + timestampMicros + ")");
+                excludedOrders.add(orderId + "(placed@" + placementTimestamp + ", pickup@" + pickupTimestamp + " <= placement@" + timestampMicros + ")");
             }
         }
         
