@@ -101,6 +101,17 @@ public class StorageManager {
             logger.info("Ideal storage {} capacity check at timestamp {}: effective size={}/{}, hasCapacity={}", 
                        idealStorage, timestampMicros, idealSize, idealCapacity, idealHasCapacity);
             
+            // Log scheduled pickups for orders in ideal storage for debugging
+            if (storage.get(idealStorage).size() > 0) {
+                logger.info("Scheduled pickups for orders in {}: {}", idealStorage,
+                    storage.get(idealStorage).stream()
+                        .map(loc -> {
+                            Long pickupTime = scheduledPickups.get(loc.getOrder().getId());
+                            return loc.getOrder().getId() + "->" + (pickupTime != null ? pickupTime : "none");
+                        })
+                        .collect(java.util.stream.Collectors.joining(", ")));
+            }
+            
             if (idealHasCapacity) {
                 logger.info("✓ Placing order {} (temp: {}) in ideal storage: {}", 
                            order.getId(), order.getTemperature(), idealStorage);
@@ -360,13 +371,31 @@ public class StorageManager {
      * Get the effective size of storage at a given timestamp, excluding orders with pickups scheduled before that timestamp.
      */
     private int getEffectiveSizeAtTimestamp(StorageType storageType, long timestampMicros) {
-        // Count orders that are currently in storage at this timestamp.
-        // Since pickups happen asynchronously, we need to exclude orders that have been
-        // picked up by this timestamp. Since we execute placements sequentially, orders
-        // currently in storage were all placed before this timestamp.
-        // Orders that have been picked up have already been removed from storage, so
-        // we just need to count the current size.
-        return storage.get(storageType).size();
+        // Count orders that will be in storage at the given timestamp.
+        // We need to exclude orders that have scheduled pickups at or before this timestamp,
+        // because those orders will be gone by the time we place the new order.
+        // The server validates actions in chronological order, and at the same timestamp,
+        // pickups are processed before placements, so we exclude orders with pickups
+        // scheduled at the exact same timestamp.
+        int count = 0;
+        for (StorageLocation location : storage.get(storageType)) {
+            String orderId = location.getOrder().getId();
+            Long pickupTimestamp = scheduledPickups.get(orderId);
+            // Count the order only if:
+            // 1. It doesn't have a scheduled pickup, OR
+            // 2. The scheduled pickup is AT OR AFTER the placement timestamp
+            // At the same timestamp, placements happen before pickups, so we count orders
+            // whose pickups are scheduled at the same timestamp or later.
+            // We only exclude orders whose pickups are scheduled BEFORE the placement timestamp.
+            if (pickupTimestamp == null || pickupTimestamp >= timestampMicros) {
+                count++;
+            } else {
+                // Order has pickup scheduled BEFORE this timestamp - exclude it
+                logger.info("Excluding order {} from effective size: pickup scheduled at {} < placement at {}", 
+                           orderId, pickupTimestamp, timestampMicros);
+            }
+        }
+        return count;
     }
     
     /**
